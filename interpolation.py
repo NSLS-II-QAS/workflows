@@ -18,6 +18,7 @@ import grp
 
 # Set up zeromq sockets
 import zmq
+import socket
 #context = zmq.Context()
 machine_name = socket.gethostname()
 
@@ -89,6 +90,13 @@ class ScanProcessor():
         self.uid = pwd.getpwnam(username).pw_uid
         self.gid = grp.getgrnam(username).gr_gid
 
+        # TODO : move this in a separate function? (Julien)
+        context = zmq.Context()
+        self.sender = context.socket(zmq.PUSH)
+        # by default we send to srv2
+        self.logger.info("Sending request to server")
+        self.sender.connect("tcp://xf08id-srv2:5561")
+
     def process(self, md, requester, interp_base='i0'):
         current_path = self.create_user_dirs(self.user_data_path,
                                              md['year'],
@@ -129,7 +137,7 @@ class ScanProcessor():
 
                 ret = create_ret('spectroscopy', current_uid, 'interpolate', self.gen_parser.interp_df,
                                  md, requester)
-                #self.sender.send(ret)
+                self.sender.send(ret)
                 self.logger.info('Interpolation of %s complete', filename)
                 self.logger.info('Binning of %s started', filename)
                 e0 = int(md['e0'])
@@ -142,7 +150,7 @@ class ScanProcessor():
                 
                 
                 ret = create_ret('spectroscopy', current_uid, 'bin', bin_df, md, requester)
-                #self.sender.send(ret)
+                self.sender.send(ret)
                 self.logger.info("Processing complete for %s", md['uid'])
 
                 
@@ -356,6 +364,18 @@ def create_req_func(data, store, signal, context):
             }
         }
 
+def create_ret_func(scan_type, uid, process_type, data, metadata, requester):
+    ret = {'type':scan_type,
+           'uid': uid,
+           'processing_ret':{
+                             'type':process_type,
+                             'data':data,
+                             'metadata': metadata
+                            }
+          }
+
+    return (requester + json.dumps(ret)).encode()
+
 
 def process_run_func(data, store, signal, context):
     #sender_host = "tcp://xf08id-srv2:5561"
@@ -387,6 +407,8 @@ def process_run_func(data, store, signal, context):
         elif process_type == 'request_interpolated_data':
             print("returning interpolated data (not done yet)")
             #processor.return_interp_data(start_doc, requester=data['requester'], filepath=data['processing_info']['filepath'])
+
+
 
 
 create_req_task = PythonTask(name="create_request", callback=create_req_func,
