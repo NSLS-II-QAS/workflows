@@ -29,8 +29,8 @@ machine_name = socket.gethostname()
 # Create PUSHER to send information back to workstations
 
 #Setup beamline specifics:
-beamline_gpfs_path = '/nsls2/xf08id/'
-user_data_path = beamline_gpfs_path + 'User Data/'
+beamline_gpfs_path = '/nsls2/xf07bm/'
+user_data_path = beamline_gpfs_path + 'users/'
 
 # Set up logging.
 import logging
@@ -45,7 +45,7 @@ def get_logger():
         logger.setLevel(logging.DEBUG)
         # Write DEBUG and INFO messages to /var/log/data_processing_worker/debug.log.
         debug_file = logging.handlers.RotatingFileHandler(
-            '/nsls2/xf08id/log/{}_data_processing_lightflow_debug.log'.format(machine_name),
+            '/nsls2/xf07bm/users/log/{}_data_processing_lightflow_debug.log'.format(machine_name),
             maxBytes=10000000, backupCount=9)
         debug_file.setLevel(logging.DEBUG)
         debug_file.setFormatter(formatter)
@@ -53,7 +53,7 @@ def get_logger():
     
         # Write INFO messages to /var/log/data_processing_worker/info.log.
         info_file = logging.handlers.RotatingFileHandler(
-            '/nsls2/xf08id/log/{}_data_processing_lightflow_info.log'.format(machine_name),
+            '/nsls2/xf07bm/users/log/{}_data_processing_lightflow_info.log'.format(machine_name),
             maxBytes=10000000, backupCount=9)
         info_file.setLevel(logging.INFO)
         info_file.setFormatter(formatter)
@@ -72,7 +72,7 @@ class ScanProcessor():
         # these can't be pickled
         self.logger = get_logger()
         db = Broker.named(dbname)
-        db_analysis = Broker.named('iss-analysis')
+        db_analysis = Broker.named('qas-analysis')
         # Set up isstools parsers
 
         # TODO: fix pulses per deg
@@ -84,7 +84,7 @@ class ScanProcessor():
         self.db = db
         self.md = {}
         self.root_path = Path(beamline_gpfs_path)
-        self.user_data_path = Path(beamline_gpfs_path) / Path('User Data')
+        self.user_data_path = Path(beamline_gpfs_path) / Path('users')
         self.xia_data_path = Path(beamline_gpfs_path) / Path('xia_files')
         context = zmq.Context()
         self.uid = pwd.getpwnam(username).pw_uid
@@ -95,7 +95,7 @@ class ScanProcessor():
         self.sender = context.socket(zmq.PUSH)
         # by default we send to srv2
         self.logger.info("Sending request to server")
-        self.sender.connect("tcp://xf08id-srv2:5561")
+        self.sender.connect("tcp://xf07bm-ws1:5561")
 
     def process(self, md, requester, interp_base='i0'):
         current_path = self.create_user_dirs(self.user_data_path,
@@ -215,7 +215,9 @@ class ScanProcessor():
         print('Processing: xia scan')
         self.gen_parser.interpolate(key_base='xia_trigger')
         xia_filename = md['xia_filename']
-        xia_filepath = 'smb://xf08id-nas1/xia_data/{}'.format(xia_filename)
+        # this should not run
+        raise ValueError("Should not get here (QAS)")
+        xia_filepath = 'smb://xf07bm-nas1/xia_data/{}'.format(xia_filename)
         xia_destfilepath = Path(self.xia_data_path) / Path(xia_filename)
 #        xia_destfilepath = '{}{}'.format(self.xia_data_path, xia_filename)
         smbclient = xiaparser.smbclient(xia_filepath, str(xia_destfilepath))
@@ -320,9 +322,11 @@ class ScanProcessor():
     def create_dir(path):
         if not op.exists(path):
             os.makedirs(path)
-            call(['setfacl', '-m', 'g:iss-staff:rwx', path])
-            call(['chown', '-R', 'xf08id:xf08id', path ])
-            self.logger.info("Directory %s created succesfully", path)
+            call(['setfacl', '-m', 'g:qas-staff:rwx', path])
+            call(['chown', '-R', 'xf07bm:xf07bm', path ])
+            # meant to be run static
+            logger = get_logger()
+            logger.info("Directory %s created succesfully", path)
 
 
 def create_ret(scan_type, uid, process_type, data, metadata, requester):
@@ -382,8 +386,8 @@ def process_run_func(data, store, signal, context):
 
     logger = get_logger()
     logger.info("Starting ScanProcessor....")
-    processor = ScanProcessor("iss", beamline_gpfs_path, 'xf08id')
-    db = Broker.named("iss")
+    processor = ScanProcessor("qas", beamline_gpfs_path, 'xf07bm')
+    db = Broker.named("qas")
     
     #self.logger.debug("Entering infinite loop...")
 
@@ -412,9 +416,9 @@ def process_run_func(data, store, signal, context):
 
 
 create_req_task = PythonTask(name="create_request", callback=create_req_func,
-                             queue='iss-worker')
+                             queue='qas-worker')
 process_run_task = PythonTask(name="process_results",
-                              callback=process_run_func, queue='iss-worker')
+                              callback=process_run_func, queue='qas-worker')
 
 
 d = Dag("processing_dag")
