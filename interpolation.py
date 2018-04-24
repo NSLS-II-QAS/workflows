@@ -22,6 +22,8 @@ import socket
 #context = zmq.Context()
 machine_name = socket.gethostname()
 
+import kafka
+
 # Create PULLER to receive information from workstations
 #receiver = context.socket(zmq.PULL)
 #receiver.connect("tcp://xf08id-srv2:5560")
@@ -68,7 +70,10 @@ from isstools.xiaparser import xiaparser
 from isstools.xasdata import xasdata
 
 class ScanProcessor():
-    def __init__(self, dbname, beamline_gpfs_path, username, *args, **kwargs):
+    def __init__(self, dbname, beamline_gpfs_path, username, 
+                 topic="qas-analysis",
+                 bootstrap_servers=['cmb01:9092', 'cmb02:9092'],
+                 *args, **kwargs):
         # these can't be pickled
         self.logger = get_logger()
         db = Broker.named(dbname)
@@ -91,11 +96,14 @@ class ScanProcessor():
         self.gid = grp.getgrnam(username).gr_gid
 
         # TODO : move this in a separate function? (Julien)
-        context = zmq.Context()
-        self.sender = context.socket(zmq.PUSH)
+        #context = zmq.Context()
+        #self.sender = context.socket(zmq.PUSH)
+        self.publisher = kafka.KafkaProducer(bootstrap_servers=bootstrap_servers)
+        self.topic = topic
+
         # by default we send to srv2
         self.logger.info("Sending request to server")
-        self.sender.connect("tcp://xf07bm-ws1:5561")
+        #self.sender.connect("tcp://xf07bm-ws1:5561")
 
     def process(self, md, requester, interp_base='i0'):
         current_path = self.create_user_dirs(self.user_data_path,
@@ -137,7 +145,8 @@ class ScanProcessor():
 
                 ret = create_ret('spectroscopy', current_uid, 'interpolate', self.gen_parser.interp_df,
                                  md, requester)
-                self.sender.send(ret)
+                #self.sender.send(ret)
+                self.publisher.send(self.topic, ret)
                 self.logger.info('Interpolation of %s complete', filename)
                 self.logger.info('Binning of %s started', filename)
                 e0 = int(md['e0'])
@@ -150,7 +159,8 @@ class ScanProcessor():
                 
                 
                 ret = create_ret('spectroscopy', current_uid, 'bin', bin_df, md, requester)
-                self.sender.send(ret)
+                #self.sender.send(ret)
+                self.publisher.send(self.topic, ret)
                 self.logger.info("Processing complete for %s", md['uid'])
 
                 
@@ -378,7 +388,7 @@ def create_ret_func(scan_type, uid, process_type, data, metadata, requester):
                             }
           }
 
-    return (requester + json.dumps(ret)).encode()
+    return (requester + pickle.dumps(ret)).encode()
 
 
 def process_run_func(data, store, signal, context):
@@ -416,12 +426,12 @@ def process_run_func(data, store, signal, context):
 
 
 create_req_task = PythonTask(name="create_request", callback=create_req_func,
-                             queue='qas-worker')
+                             queue='qas-task')
 process_run_task = PythonTask(name="process_results",
-                              callback=process_run_func, queue='qas-worker')
+                              callback=process_run_func, queue='qas-task')
 
 
-d = Dag("processing_dag")
+d = Dag("processing_dag", queue="qas-dag")
 d.define({
     create_req_task: process_run_task,
-    }) 
+    })
