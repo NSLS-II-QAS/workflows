@@ -16,6 +16,12 @@ import numpy as np
 import pwd
 import grp
 
+import time as ttime
+
+# lightflow stuff
+from lightflow.models import Dag, Action, Parameters, Option
+from lightflow.tasks import PythonTask
+
 # Set up zeromq sockets
 import zmq
 import socket
@@ -47,7 +53,7 @@ def get_logger():
         logger.setLevel(logging.DEBUG)
         # Write DEBUG and INFO messages to /var/log/data_processing_worker/debug.log.
         debug_file = logging.handlers.RotatingFileHandler(
-            '/nsls2/xf07bm/users/log/{}_data_processing_lightflow_debug.log'.format(machine_name),
+            beamline_gpfs_path + '/log/{}_data_processing_lightflow_debug.log'.format(machine_name),
             maxBytes=10000000, backupCount=9)
         debug_file.setLevel(logging.DEBUG)
         debug_file.setFormatter(formatter)
@@ -55,7 +61,7 @@ def get_logger():
     
         # Write INFO messages to /var/log/data_processing_worker/info.log.
         info_file = logging.handlers.RotatingFileHandler(
-            '/nsls2/xf07bm/users/log/{}_data_processing_lightflow_info.log'.format(machine_name),
+            beamline_gpfs_path + '/log/{}_data_processing_lightflow_info.log'.format(machine_name),
             maxBytes=10000000, backupCount=9)
         info_file.setLevel(logging.INFO)
         info_file.setFormatter(formatter)
@@ -71,17 +77,18 @@ from isstools.xasdata import xasdata
 
 class ScanProcessor():
     def __init__(self, dbname, beamline_gpfs_path, username, 
-                 topic="qas-analysis",
+                 pulses_per_deg=360000, topic="qas-processing",
                  bootstrap_servers=['cmb01:9092', 'cmb02:9092'],
                  *args, **kwargs):
         # these can't be pickled
         self.logger = get_logger()
+        self.logger.info("Begin scan processor")
         db = Broker.named(dbname)
         db_analysis = Broker.named('qas-analysis')
         # Set up isstools parsers
 
         # TODO: fix pulses per deg
-        gen_parser = xasdata.XASdataGeneric(360000, db, db_analysis)
+        gen_parser = xasdata.XASdataGeneric(pulses_per_deg, db, db_analysis)
         xia_parser = xiaparser.xiaparser()
 
         self.gen_parser = gen_parser
@@ -91,7 +98,6 @@ class ScanProcessor():
         self.root_path = Path(beamline_gpfs_path)
         self.user_data_path = Path(beamline_gpfs_path) / Path('users')
         self.xia_data_path = Path(beamline_gpfs_path) / Path('xia_files')
-        context = zmq.Context()
         self.uid = pwd.getpwnam(username).pw_uid
         self.gid = grp.getgrnam(username).gr_gid
 
@@ -116,7 +122,7 @@ class ScanProcessor():
             current_uid = md['uid']
             self.gen_parser.load(current_uid)
         except:
-            print("md['name'] not set")
+            self.logger.info("md['name'] not set")
             pass
         
 
@@ -143,10 +149,11 @@ class ScanProcessor():
 
                 self.logger.info('Interpolated file %s stored to ', filename)
 
-                ret = create_ret('spectroscopy', current_uid, 'interpolate', self.gen_parser.interp_df,
+                ret = create_ret('spectroscopy', current_uid, 'interpolate', filename,
                                  md, requester)
                 #self.sender.send(ret)
-                self.publisher.send(self.topic, ret)
+                future = self.publisher.send(self.topic, ret)
+                result = future.get(timeout=60)
                 self.logger.info('Interpolation of %s complete', filename)
                 self.logger.info('Binning of %s started', filename)
                 e0 = int(md['e0'])
@@ -158,9 +165,11 @@ class ScanProcessor():
                 self.logger.info('Binning of %s complete', filename)
                 
                 
-                ret = create_ret('spectroscopy', current_uid, 'bin', bin_df, md, requester)
+                ret = create_ret('spectroscopy', current_uid, 'bin', filename, md, requester)
                 #self.sender.send(ret)
-                self.publisher.send(self.topic, ret)
+                # need to wait before exiting
+                future = self.publisher.send(self.topic, ret)
+                result = future.get(timeout=60)
                 self.logger.info("Processing complete for %s", md['uid'])
 
                 
@@ -197,13 +206,19 @@ class ScanProcessor():
         filename = self.gen_parser.data_manager.export_dat(f'{str(current_filepath)}', e0)
         
         os.chown(filename, self.uid, self.gid)
-        ret = create_ret('spectroscopy', md['uid'], 'bin', bin_df, md, requester)
+        ret = create_ret('spectroscopy', md['uid'], 'bin', filename, md, requester)
         self.logger.info('File %s binned', filename)
-        #self.sender.send(ret)
+        future = self.publisher.send(self.topic, ret)
+        result = future.get(timeout=60)
+        # WARNING: We NEED this sleep!
+        # There seems to be a bug with pykafka!!!!
+        ttime.sleep(1)
         self.logger.info("Binning complete for %s", md['uid'])
         print(os.getpid(), 'Done with the binning!') 
 
     def return_interp_data(self, md, requester, filepath=''):
+        logger = get_logger()
+        logger.info("Processor: preparing to return interpolated data")
         if filepath is not '':
             current_filepath = filepath
         else:
@@ -212,9 +227,20 @@ class ScanProcessor():
                                                  md['cycle'],
                                                  md['PROPOSAL'])
             current_filepath = str(Path(current_path) / Path(md['name'])) + '.txt'
+        logger.info("Processor: reading interp file : {}".format(str(current_filepath)))
         self.gen_parser.loadInterpFile(f'{str(current_filepath)}')
-        ret = create_ret('spectroscopy', md['uid'], 'request_interpolated_data', self.gen_parser.interp_df, md, requester)
-        #self.sender.send(ret)
+        logger.info("Processor: loaded. Preparing return to send")
+        ret = create_ret('spectroscopy', md['uid'], 'request_interpolated_data', current_filepath, md, requester)
+        logger.info("Processor: sending back the interpolated data from request to topic {}".format(self.topic))
+        #from celery.contrib import rdb
+        #rdb.set_trace()
+        future = self.publisher.send(self.topic, ret)
+        result = future.get(timeout=60)
+        # WARNING: We NEED this sleep!
+        # There seems to be a bug with pykafka!!!!
+        ttime.sleep(1)
+        logger.info("Processor: sent")
+
 
     def process_tscan(self, interp_base='i0'):
         print('Processing tscan')
@@ -340,43 +366,32 @@ class ScanProcessor():
 
 
 def create_ret(scan_type, uid, process_type, data, metadata, requester):
+    '''
+        Create a return.
+        Can also be a file path
+    '''
+    if hasattr(data, 'to_msgpack'):
+        data = data.to_msgpack(compress='zlib')
+    else:
+        # not a df, just string
+        data = data.encode()
     ret = {'type':scan_type,
            'uid': uid,
            'processing_ret':{
-                             'type':process_type,
-                             'data':data.to_msgpack(compress='zlib'),
+                             'type': process_type,
+                             'data': data,
                              'metadata': metadata
                             }
           }
 
     return (requester.encode() + pickle.dumps(ret))
 
-# lightflow stuff
-from lightflow.models import Dag, Action, Parameters, Option
-from lightflow.tasks import PythonTask
 
 # required parameters for the call
 parameters = Parameters([
-        Option('uid', help='Specify a uid', type=str),
-        Option('requester', help='Specify a requester', type=str),
+        Option('request', help='Specify a uid', type=dict),
         ])
 
-
-def create_req_func(data, store, signal, context):
-    uid = store.get('uid')
-    requester = store.get('requester')
-    data['uid'] = uid
-    data['requester'] = requester
-
-    data['request'] = {
-            'uid': uid,
-            'requester': requester,
-            'type': 'spectroscopy',
-            'processing_info': {
-                'type': 'interpolate',
-                'interp_base': 'i0'
-            }
-        }
 
 def create_ret_func(scan_type, uid, process_type, data, metadata, requester):
     ret = {'type':scan_type,
@@ -402,36 +417,37 @@ def process_run_func(data, store, signal, context):
     #self.logger.debug("Entering infinite loop...")
 
     #data = json.loads(receiver.recv().decode('utf-8'))
-    data = data['request']
+    request = store.get('request')
+    uid = request['uid']
 
-    md = db[data['uid']].start
+    md = db[uid].start
 
-    if data['type'] == 'spectroscopy':
-        process_type = data['processing_info']['type']
+    if request['type'] == 'spectroscopy':
+        process_type = request['processing_info']['type']
 
         start_doc = md 
         if process_type == 'interpolate':
-            print("interpolating (not performed yet)")
-            processor.process(start_doc, requester=data['requester'], interp_base=data['processing_info']['interp_base'])
+            logger.info("interpolating (not performed yet)")
+            processor.process(start_doc, requester=request['requester'], interp_base=request['processing_info']['interp_base'])
            
         elif process_type == 'bin':
-            print("binning (not performed yet)")
-            #processor.bin(start_doc, requester=data['requester'], proc_info=data['processing_info'], filepath=data['processing_info']['filepath'])
+            logger.info("binning (not performed yet)")
+            processor.bin(start_doc, requester=request['requester'], proc_info=request['processing_info'], filepath=request['processing_info']['filepath'])
 
         elif process_type == 'request_interpolated_data':
-            print("returning interpolated data (not done yet)")
-            #processor.return_interp_data(start_doc, requester=data['requester'], filepath=data['processing_info']['filepath'])
+            logger.info("returning interpolated data (not done yet)")
+            processor.return_interp_data(start_doc, requester=request['requester'], filepath=request['processing_info']['filepath'])
 
 
 
-
-create_req_task = PythonTask(name="create_request", callback=create_req_func,
-                             queue='qas-task')
-process_run_task = PythonTask(name="process_results",
+# don't create the request anymore
+#create_req_task = PythonTask(name="create_req_func", callback=create_req_func,
+                             #queue='qas-task')
+process_run_task = PythonTask(name="process_run_func",
                               callback=process_run_func, queue='qas-task')
 
 
-d = Dag("processing_dag", queue="qas-dag")
+d = Dag("interpolation", queue="qas-dag")
 d.define({
-    create_req_task: process_run_task,
+    process_run_task: None,
     })
