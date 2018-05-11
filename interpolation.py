@@ -53,7 +53,7 @@ def get_logger():
         logger.setLevel(logging.DEBUG)
         # Write DEBUG and INFO messages to /var/log/data_processing_worker/debug.log.
         debug_file = logging.handlers.RotatingFileHandler(
-            beamline_gpfs_path + '/log/{}_data_processing_lightflow_debug.log'.format(machine_name),
+            beamline_gpfs_path + '/users/log/{}_data_processing_lightflow_debug.log'.format(machine_name),
             maxBytes=10000000, backupCount=9)
         debug_file.setLevel(logging.DEBUG)
         debug_file.setFormatter(formatter)
@@ -61,7 +61,7 @@ def get_logger():
     
         # Write INFO messages to /var/log/data_processing_worker/info.log.
         info_file = logging.handlers.RotatingFileHandler(
-            beamline_gpfs_path + '/log/{}_data_processing_lightflow_info.log'.format(machine_name),
+            beamline_gpfs_path + '/users/log/{}_data_processing_lightflow_info.log'.format(machine_name),
             maxBytes=10000000, backupCount=9)
         info_file.setLevel(logging.INFO)
         info_file.setFormatter(formatter)
@@ -414,10 +414,12 @@ def process_run_func(data, store, signal, context):
     processor = ScanProcessor("qas", beamline_gpfs_path, 'xf07bm')
     db = Broker.named("qas")
     
-    #self.logger.debug("Entering infinite loop...")
 
     #data = json.loads(receiver.recv().decode('utf-8'))
     request = store.get('request')
+    #logger.debug("request : %s", request)
+    #from celery.contrib import rdb
+    #rdb.set_trace()
     uid = request['uid']
 
     md = db[uid].start
@@ -428,6 +430,8 @@ def process_run_func(data, store, signal, context):
         start_doc = md 
         if process_type == 'interpolate':
             logger.info("interpolating (not performed yet)")
+            #from celery.contrib import rdb
+            #rdb.set_trace()
             processor.process(start_doc, requester=request['requester'], interp_base=request['processing_info']['interp_base'])
            
         elif process_type == 'bin':
