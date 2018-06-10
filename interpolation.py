@@ -408,15 +408,18 @@ def create_ret_func(scan_type, uid, process_type, data, metadata, requester):
 
 def process_run_func(data, store, signal, context):
     #sender_host = "tcp://xf08id-srv2:5561"
-
     logger = get_logger()
     logger.info("Starting ScanProcessor....")
-    processor = ScanProcessor("qas", beamline_gpfs_path, 'xf07bm')
+
+    request = store.get('request')
+
+    pulses_per_deg = request.get('pulses_per_deg')
+    processor = ScanProcessor("qas", beamline_gpfs_path, 'xf07bm',
+                              pulses_per_deg=pulses_per_deg)
     db = Broker.named("qas")
     
 
     #data = json.loads(receiver.recv().decode('utf-8'))
-    request = store.get('request')
     #logger.debug("request : %s", request)
     #from celery.contrib import rdb
     #rdb.set_trace()
