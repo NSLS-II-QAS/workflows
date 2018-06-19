@@ -1,6 +1,8 @@
 # Set up a Broker.
 
 from databroker.assets.handlers_base import HandlerBase
+from databroker.assets.path_only_handlers import RawHandler
+
 
 
 # Import other stuff
@@ -15,6 +17,7 @@ import pandas as pd
 import numpy as np
 import pwd
 import grp
+from collections import namedtuple
 
 import time as ttime
 
@@ -75,6 +78,64 @@ from databroker import Broker
 from isstools.xiaparser import xiaparser
 from isstools.xasdata import xasdata
 
+
+class PizzaBoxEncHandlerTxt(HandlerBase):
+    encoder_row = namedtuple('encoder_row',
+                             ['ts_s', 'ts_ns', 'encoder', 'index', 'state'])
+    "Read PizzaBox text files using info from filestore."
+    def __init__(self, fpath, chunk_size):
+        self.chunk_size = chunk_size
+        with open(fpath, 'r') as f:
+            self.lines = list(f)
+
+    def __call__(self, chunk_num):
+        cs = self.chunk_size
+        return [self.encoder_row(*(int(v) for v in ln.split()))
+                for ln in self.lines[chunk_num*cs:(chunk_num+1)*cs]]
+
+
+class PizzaBoxDIHandlerTxt(HandlerBase):
+    di_row = namedtuple('di_row', ['ts_s', 'ts_ns', 'encoder', 'index', 'di'])
+    "Read PizzaBox text files using info from filestore."
+    def __init__(self, fpath, chunk_size):
+        self.chunk_size = chunk_size
+        with open(fpath, 'r') as f:
+            self.lines = list(f)
+
+    def __call__(self, chunk_num):
+        cs = self.chunk_size
+        return [self.di_row(*(int(v) for v in ln.split()))
+                for ln in self.lines[chunk_num*cs:(chunk_num+1)*cs]]
+
+
+class PizzaBoxAnHandlerTxt(HandlerBase):
+    ''' Like pizza box handler except each file has two columns
+    '''
+    "Read PizzaBox text files using info from filestore."
+
+    def __init__(self, fpath, chunk_size):
+        self.chunk_size = chunk_size
+        #print("chunk size : {}".format(chunk_size))
+        with open(fpath, 'r') as f:
+            self.lines = list(f)
+        print(fpath)
+        self.ncols = len(self.lines[0].split())
+        print("number of columns is {}".format(self.ncols))
+        self.cols = ['ts_s', 'ts_ns', 'index', 'adc']
+        self.bases = [10, 10, 10, 16]
+        self.encoder_row = namedtuple('encoder_row', self.cols)
+
+    def __call__(self, chunk_num, column=0):
+        cs = self.chunk_size
+        col_index = column + 3
+        # TODO : clean up this logic, maybe use pandas?
+        # need to first look at how isstools parses this
+        return [self.encoder_row(*(int(v, base=b) for v, b in zip((ln.split()[i] for i in [0,1,2,col_index]), self.bases)))
+                for ln in self.lines[chunk_num*cs:(chunk_num+1)*cs]]
+
+
+
+
 class ScanProcessor():
     def __init__(self, dbname, beamline_gpfs_path, username, 
                  pulses_per_deg=360000, topic="qas-processing",
@@ -84,6 +145,14 @@ class ScanProcessor():
         self.logger = get_logger()
         self.logger.info("Begin scan processor")
         db = Broker.named(dbname)
+        # need to register handlers
+        db.reg.register_handler('PIZZABOX_AN_FILE_TXT',
+                                PizzaBoxAnHandlerTxt, overwrite=True)
+        db.reg.register_handler('PIZZABOX_ENC_FILE_TXT',
+                                PizzaBoxEncHandlerTxt, overwrite=True)
+        db.reg.register_handler('PIZZABOX_DI_FILE_TXT',
+                                PizzaBoxDIHandlerTxt, overwrite=True)
+
         db_analysis = Broker.named('qas-analysis')
         # Set up isstools parsers
 
@@ -120,8 +189,8 @@ class ScanProcessor():
             current_filepath = Path(current_path) / Path(md['name'])
             current_filepath = ScanProcessor.get_new_filepath(str(current_filepath) + '.hdf5')
             current_uid = md['uid']
-            self.gen_parser.load(current_uid)
-        except:
+            self.gen_parser.loadDB(current_uid)
+        except AttributeError:
             self.logger.info("md['name'] not set")
             pass
         
